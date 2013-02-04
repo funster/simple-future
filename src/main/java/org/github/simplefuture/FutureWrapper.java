@@ -1,6 +1,9 @@
 package org.github.simplefuture;
 
 import java.util.concurrent.*;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 @SuppressWarnings("unused")
 public class FutureWrapper<V> implements Future<V> {
@@ -8,15 +11,29 @@ public class FutureWrapper<V> implements Future<V> {
     private FutureSuccess<V> success;
     private FutureFailure failure;
     private final FutureTask<V> futureTask;
-    private Throwable throwable;
-    private volatile boolean successInvoked;
-    private volatile boolean failureInvoked;
+
+    // --- RESULTS
+    private volatile Throwable throwable;
+    private volatile V result;
+
+    // --- FLAGS
+    private volatile Status status; // with success or not
+
+    enum Status {
+        not_defined, success, fail
+    }
+
+    private final ReadWriteLock lock = new ReentrantReadWriteLock();
+    private final Lock readLock = lock.readLock();
+    private final Lock writeLock = lock.writeLock();
 
     private final Object finalizerGuard = new Object() {
         @Override
         protected void finalize() throws Throwable {
             super.finalize();
-            LazyExecutor.EXECUTOR_SERVICE.shutdown();
+            if (!LazyExecutor.EXECUTOR_SERVICE.isShutdown()) {
+                LazyExecutor.EXECUTOR_SERVICE.shutdown();
+            }
         }
     };
 
@@ -25,13 +42,15 @@ public class FutureWrapper<V> implements Future<V> {
             @Override
             public V call() throws Exception {
                 try {
-                    return callable.call();
+                    result = callable.call();
+                    status = Status.success;
+                    notifyIfSuccess();
+                    return result;
                 } catch (Throwable e) {
                     throwable = e;
+                    status = Status.fail;
                     notifyIfFailure();
                     return null;
-                } finally {
-                    notifyIfSuccess();
                 }
             }
         };
@@ -39,13 +58,34 @@ public class FutureWrapper<V> implements Future<V> {
         submit(futureTask);
     }
 
+    // todo: synchronize this in promise
+    void setSuccess(V result) {
+        writeLock.lock();
+        try {
+            this.result = result;
+            status = Status.success;
+        } finally {
+            writeLock.lock();
+        }
+    }
+
+    // todo: synchronize this in promise
+    void setFailure(Throwable throwable) {
+        writeLock.lock();
+        try {
+            this.throwable = throwable;
+            status = Status.fail;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
     public static <V> FutureWrapper<V> future(Callable<V> callable) {
         return new FutureWrapper<V>(callable);
     }
 
     private void notifyIfSuccess() {
-        if (success != null && !successInvoked) {
-            successInvoked = true;
+        if (status == Status.success) {
             LazyExecutor.EXECUTOR_SERVICE.submit(new Runnable() {
                 @Override
                 public void run() {
@@ -62,8 +102,7 @@ public class FutureWrapper<V> implements Future<V> {
     }
 
     private void notifyIfFailure() {
-        if (throwable != null && !failureInvoked) {
-            failureInvoked = true;
+        if (status == Status.fail) {
             LazyExecutor.EXECUTOR_SERVICE.submit(new Runnable() {
                 @Override
                 public void run() {
@@ -77,22 +116,16 @@ public class FutureWrapper<V> implements Future<V> {
         LazyExecutor.EXECUTOR_SERVICE.submit(runnable);
     }
 
-    static class LazyExecutor {
-        private static final ExecutorService EXECUTOR_SERVICE = Executors.newCachedThreadPool(new DaemonThreadFactory());
-    }
 
-    static class DaemonThreadFactory implements ThreadFactory {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread thread = new Thread(r);
-            thread.setDaemon(true);
-            return thread;
-        }
-    }
-
+    //----- FEATURE METHODS -----
     @Override
     public boolean cancel(boolean mayInterruptIfRunning) {
-        return futureTask.cancel(mayInterruptIfRunning);
+        readLock.lock();
+        try {
+            return isUndefined() && futureTask.cancel(mayInterruptIfRunning);
+        } finally {
+            readLock.unlock();
+        }
     }
 
     @Override
@@ -100,20 +133,58 @@ public class FutureWrapper<V> implements Future<V> {
         return futureTask.isCancelled();
     }
 
+    private boolean isUndefined() {
+        return status == Status.not_defined;
+    }
+
     @Override
     public boolean isDone() {
-        return futureTask.isDone();
+        readLock.lock();
+        try {
+            return !isUndefined() || futureTask.isDone();
+        } finally {
+            readLock.unlock();
+        }
     }
 
     @Override
     public V get() throws InterruptedException, ExecutionException {
-        return futureTask.get();
+        readLock.lock();
+        try {
+            if (isUndefined()) {
+                return futureTask.get();
+            } else {
+                switch (status) {
+                    case success:
+                        return result;
+                    default:
+                        return null;
+                }
+            }
+        } finally {
+            readLock.unlock();
+        }
     }
 
     @Override
     public V get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException {
-        return futureTask.get(timeout, unit);
+        readLock.lock();
+        try {
+            if (isUndefined()) {
+                return futureTask.get(timeout, unit);
+            } else {
+                switch (status) {
+                    case success:
+                        return result;
+                    default:
+                        return null;
+                }
+            }
+        } finally {
+            readLock.unlock();
+        }
     }
+    //----- FEATURE METHODS -----
 
     public FutureWrapper<V> onSuccess(FutureSuccess<V> success) {
         assertNotNull(success);
@@ -129,17 +200,22 @@ public class FutureWrapper<V> implements Future<V> {
         return this;
     }
 
-    public interface FutureSuccess<T> {
-        void apply(T result);
-    }
-
-    public interface FutureFailure {
-        void apply(Throwable throwable);
-    }
-
     static void assertNotNull(Object o) {
         if (o == null) {
             throw new NullPointerException("Can't be null");
+        }
+    }
+
+    static class LazyExecutor {
+        private static final ExecutorService EXECUTOR_SERVICE = Executors.newCachedThreadPool(new DaemonThreadFactory());
+    }
+
+    static class DaemonThreadFactory implements ThreadFactory {
+        @Override
+        public Thread newThread(Runnable r) {
+            Thread thread = new Thread(r);
+            thread.setDaemon(true);
+            return thread;
         }
     }
 }

@@ -1,4 +1,5 @@
 package org.github.simplefuture;
 
-public interface FutureSuccess {
+public interface FutureSuccess<T> {
+    void apply(T result);
 }
