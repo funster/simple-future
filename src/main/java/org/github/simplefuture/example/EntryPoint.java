@@ -1,4 +1,6 @@
-package org.github.simplefuture;
+package org.github.simplefuture.example;
+
+import org.github.simplefuture.FutureSuccess;
 
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
@@ -15,7 +17,7 @@ public class EntryPoint {
                 TimeUnit.SECONDS.sleep(1);
                 return "test432";
             }
-        }).onSuccess(new FutureWrapper.FutureSuccess<String>() {
+        }).onSuccess(new FutureSuccess<String>() {
             @Override
             public void apply(String result) {
                 System.out.println("success: " + result);
