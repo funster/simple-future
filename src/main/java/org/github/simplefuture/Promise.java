@@ -1,17 +1,8 @@
 package org.github.simplefuture;
 
-@SuppressWarnings("unused")
-public class Promise<V> {
+public interface Promise<V> {
 
-    public void success(V result) {
+    public void success(V result);
 
-    }
-
-    public void failure(Throwable throwable) {
-
-    }
-
-    public FutureWrapper<V> future() {
-        return null;
-    }
+    public void failure(Throwable throwable);
 }

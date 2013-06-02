@@ -5,12 +5,14 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-@SuppressWarnings("unused")
-public class FutureWrapper<V> implements Future<V> {
+import static org.github.simplefuture.Async.assertNotNull;
+
+class FutureWrapper<V> implements ExtendedFuture<V> {
 
     private FutureSuccess<V> success;
     private FutureFailure failure;
     private final FutureTask<V> futureTask;
+    private final Promise<V> promise = new PromiseWrapper<V>(this);
 
     // --- RESULTS
     private volatile Throwable throwable;
@@ -27,17 +29,7 @@ public class FutureWrapper<V> implements Future<V> {
     private final Lock readLock = lock.readLock();
     private final Lock writeLock = lock.writeLock();
 
-    private final Object finalizerGuard = new Object() {
-        @Override
-        protected void finalize() throws Throwable {
-            super.finalize();
-            if (!LazyExecutor.EXECUTOR_SERVICE.isShutdown()) {
-                LazyExecutor.EXECUTOR_SERVICE.shutdown();
-            }
-        }
-    };
-
-    private FutureWrapper(final Callable<V> callable) {
+    FutureWrapper(final Callable<V> callable) {
         Callable<V> wrap = new Callable<V>() {
             @Override
             public V call() throws Exception {
@@ -58,10 +50,10 @@ public class FutureWrapper<V> implements Future<V> {
         submit(futureTask);
     }
 
-    // todo: synchronize this in promise
     void setSuccess(V result) {
         writeLock.lock();
         try {
+            futureTask.cancel(true);
             this.result = result;
             status = Status.success;
         } finally {
@@ -69,10 +61,10 @@ public class FutureWrapper<V> implements Future<V> {
         }
     }
 
-    // todo: synchronize this in promise
     void setFailure(Throwable throwable) {
         writeLock.lock();
         try {
+            futureTask.cancel(true);
             this.throwable = throwable;
             status = Status.fail;
         } finally {
@@ -80,13 +72,9 @@ public class FutureWrapper<V> implements Future<V> {
         }
     }
 
-    public static <V> FutureWrapper<V> future(Callable<V> callable) {
-        return new FutureWrapper<V>(callable);
-    }
-
     private void notifyIfSuccess() {
         if (status == Status.success) {
-            LazyExecutor.EXECUTOR_SERVICE.submit(new Runnable() {
+            Async.EXECUTOR_SERVICE.submit(new Runnable() {
                 @Override
                 public void run() {
                     try {
@@ -103,7 +91,7 @@ public class FutureWrapper<V> implements Future<V> {
 
     private void notifyIfFailure() {
         if (status == Status.fail) {
-            LazyExecutor.EXECUTOR_SERVICE.submit(new Runnable() {
+            Async.EXECUTOR_SERVICE.submit(new Runnable() {
                 @Override
                 public void run() {
                     failure.apply(throwable);
@@ -113,9 +101,8 @@ public class FutureWrapper<V> implements Future<V> {
     }
 
     private static void submit(Runnable runnable) {
-        LazyExecutor.EXECUTOR_SERVICE.submit(runnable);
+        Async.EXECUTOR_SERVICE.submit(runnable);
     }
-
 
     //----- FEATURE METHODS -----
     @Override
@@ -184,8 +171,9 @@ public class FutureWrapper<V> implements Future<V> {
             readLock.unlock();
         }
     }
-    //----- FEATURE METHODS -----
 
+    //----- FEATURE METHODS -----
+    @Override
     public FutureWrapper<V> onSuccess(FutureSuccess<V> success) {
         assertNotNull(success);
         this.success = success;
@@ -193,6 +181,7 @@ public class FutureWrapper<V> implements Future<V> {
         return this;
     }
 
+    @Override
     public FutureWrapper<V> onFailure(FutureFailure failure) {
         assertNotNull(failure);
         this.failure = failure;
@@ -200,22 +189,8 @@ public class FutureWrapper<V> implements Future<V> {
         return this;
     }
 
-    static void assertNotNull(Object o) {
-        if (o == null) {
-            throw new NullPointerException("Can't be null");
-        }
-    }
-
-    static class LazyExecutor {
-        private static final ExecutorService EXECUTOR_SERVICE = Executors.newCachedThreadPool(new DaemonThreadFactory());
-    }
-
-    static class DaemonThreadFactory implements ThreadFactory {
-        @Override
-        public Thread newThread(Runnable r) {
-            Thread thread = new Thread(r);
-            thread.setDaemon(true);
-            return thread;
-        }
+    @Override
+    public Promise<V> getPromise() {
+        return promise;
     }
 }
